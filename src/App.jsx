@@ -15,55 +15,78 @@ const fromBase64Url = (str) => atob(str.replace(/-/g, '+').replace(/_/g, '/'));
 
 // Helper functions to compress and decompress signal data
 const encodeSignal = (data) => {
-  const jsonString = JSON.stringify(data);
-  const compressed = pako.deflate(jsonString);
-  // Convert Uint8Array to a binary string
-  const binaryString = String.fromCharCode.apply(null, compressed);
-  return toBase64Url(binaryString);
+  try {
+    const jsonString = JSON.stringify(data);
+    const compressed = pako.deflate(jsonString);
+    const binaryString = Array.from(compressed).map(char => String.fromCharCode(char)).join('');
+    return toBase64Url(binaryString);
+  } catch (e) {
+    console.error('Encoding error:', e);
+    throw new Error('Failed to encode signal');
+  }
 };
 
 const decodeSignal = (encoded) => {
-  const binaryString = fromBase64Url(encoded);
-  // Convert binary string back to Uint8Array
-  const compressed = new Uint8Array(binaryString.length);
-  for (let i = 0; i < binaryString.length; i++) {
-    compressed[i] = binaryString.charCodeAt(i);
+  try {
+    const binaryString = fromBase64Url(encoded);
+    const compressed = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      compressed[i] = binaryString.charCodeAt(i);
+    }
+    const decompressed = pako.inflate(compressed, { to: 'string' });
+    return JSON.parse(decompressed);
+  } catch (e) {
+    console.error('Decoding error:', e);
+    throw new Error('Invalid signal format');
   }
-  const decompressed = pako.inflate(compressed, { to: 'string' });
-  return JSON.parse(decompressed);
 };
 
+
+
 function App() {
-  const [mode, setMode] = useState(null); // 'host' or 'join'
+  const [mode, setMode] = useState(null);
   const [peer, setPeer] = useState(null);
   const [remoteSignal, setRemoteSignal] = useState('');
   const [connected, setConnected] = useState(false);
   const [isInitiator, setIsInitiator] = useState(false);
-  const [hostSignal, setHostSignal] = useState(''); // Host's initial offer
-  const [joinSignal, setJoinSignal] = useState(''); // Joiner's final answer
+  const [hostSignal, setHostSignal] = useState('');
+  const [joinSignal, setJoinSignal] = useState('');
   const [status, setStatus] = useState('');
+  const [ICEStatus, setICEStatus] = useState('');
   const [gameState, setGameState] = useState({
     word: '',
     guessedLetters: [],
-    turn: 'host', // 'host' or 'join'
-    status: 'waiting', // 'waiting', 'setting_word', 'playing', 'finished'
+    turn: 'host',
+    status: 'waiting',
   });
-  const [role, setRole] = useState(null); // 'giver' or 'guesser'
+  const [role, setRole] = useState(null);
   const [roleLocked, setRoleLocked] = useState(false);
   const [playerName, setPlayerName] = useState('');
   const [opponentName, setOpponentName] = useState('');
   const peerRef = useRef();
-  console.log(peer);
+  const connectionTimeoutRef = useRef();
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (peerRef.current) {
+        peerRef.current.destroy();
+      }
+      if (connectionTimeoutRef.current) {
+        clearTimeout(connectionTimeoutRef.current);
+      }
+    };
+  }, []);
+
   // Effect to determine who sets the word first
   useEffect(() => {
     if (connected && isInitiator && role) {
-      // Only the initiator and after role selection
       const newGameState = {
         word: '',
         guessedLetters: [],
         wordGiver: role === 'giver' ? mode : (mode === 'host' ? 'join' : 'host'),
         guesser: role === 'giver' ? (mode === 'host' ? 'join' : 'host') : mode,
-        turn: 'set_word', // 'set_word', 'guess', 'finished'
+        turn: 'set_word',
         status: 'setting_word',
         round: 1,
         maxMistakes: 9,
@@ -71,64 +94,166 @@ function App() {
       setGameState(newGameState);
       sendGameState(newGameState);
     }
-    // eslint-disable-next-line
-  }, [connected, isInitiator, role]);
+  }, [connected, isInitiator, role, mode]);
 
-  // Host: create peer and generate offer
-  const startHost = () => {
-    setIsInitiator(true);
-    setMode('host');
-    const p = new Peer({ initiator: true, trickle: false });
-    setPeer(p);
-    peerRef.current = p;
-    p.on('signal', data => {
+  const setupPeer = (isInitiator) => {
+
+  if (peerRef.current) {
+    peerRef.current.destroy();
+    peerRef.current = null;
+  }
+
+  const p = new Peer({
+    initiator: isInitiator,
+    trickle: true,
+    config: { 
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        // Add your TURN server here if needed:
+        // { urls: 'turn:your.turn.server', username: 'user', credential: 'pass' }
+      ]
+    },
+    // Optional: Configure SDP semantics for better compatibility
+    sdpSemantics: 'unified-plan'
+  });
+
+  // Store peer reference
+  setPeer(p);
+  peerRef.current = p;
+
+  // Track if peer is destroyed
+  let isDestroyed = false;
+
+  // Signal handler - only process offers and answers
+  p.on('signal', (data) => {
+    if (isDestroyed) return;
+    console.log('Signal generated:', data);
+    if (data.type === 'offer') {
       setHostSignal(encodeSignal(data));
-    });
-    p.on('connect', () => {
-      setConnected(true);
-      setStatus('Connected!');
-    });
-    p.on('data', handleData);
-    p.on('close', () => setConnected(false));
-  };
-
-  // Join: create peer and wait for offer
-  const startJoin = () => {
-    setIsInitiator(false);
-    setMode('join');
-    const p = new Peer({ initiator: false, trickle: false });
-    setPeer(p);
-    peerRef.current = p;
-    p.on('signal', data => {
+      if (isInitiator) {
+        setStatus('Offer created. Share this with the other player:');
+      }
+    } else if (data.type === 'answer') {
       setJoinSignal(encodeSignal(data));
-    });
-    p.on('connect', () => {
-      setConnected(true);
+      if (!isInitiator) {
+        setStatus('Answer created. Share this with the host:');
+      }
+    }
+    // Note: We intentionally ignore candidate signals here
+  });
+
+  // Connection established
+  p.on('connect', () => {
+    if (isDestroyed) return;
+    console.log('Peer connection established');
+    setConnected(true);
+    setStatus('Connected! Starting game...');
+    clearConnectionTimeout();
+  });
+
+  // Data channel message handler
+  p.on('data', handleData);
+
+  // Connection closed
+  p.on('close', () => {
+    isDestroyed = true;
+    console.log('Peer connection closed');
+    setConnected(false);
+    setStatus('Connection closed');
+    clearConnectionTimeout();
+  });
+
+  // Error handler
+  p.on('error', (err) => {
+    isDestroyed = true;
+    console.error('Peer error:', err);
+    setStatus(`Connection error: ${err.message}`);
+    clearConnectionTimeout();
+  });
+
+  // ICE connection state changes
+  p.on('iceStateChange', (state) => {
+    console.log('ICE state changed:', state);
+    setICEStatus(state);
+    
+    if (state === 'disconnected') {
+      setStatus('Connection lost. Trying to reconnect...');
+    } else if (state === 'failed') {
+      setStatus('Connection failed. Please try again.');
+      p.destroy();
+    } else if (state === 'connected') {
       setStatus('Connected!');
-    });
-    p.on('data', handleData);
-    p.on('close', () => setConnected(false));
-  };
+    }
+  });
+
+  // Track ICE gathering state
+  p.on('iceGatheringStateChange', (state) => {
+    console.log('ICE gathering state:', state);
+  });
+
+  // Track signaling state
+  p.on('signalingStateChange', (state) => {
+    console.log('Signaling state:', state);
+  });
+
+  // Start connection timeout
+  startConnectionTimeout(p);
+
+  return p;
+};
+
+const startConnectionTimeout = (peer) => {
+  connectionTimeoutRef.current = setTimeout(() => {
+    if (!connected && peer && !peer.destroyed) {
+      setStatus('Connection timed out. Please try again.');
+      peer.destroy();
+    }
+  }, 1500000);
+};
+
+const clearConnectionTimeout = () => {
+  if (connectionTimeoutRef.current) {
+    clearTimeout(connectionTimeoutRef.current);
+    connectionTimeoutRef.current = null;
+  }
+};
+
+  // Modified startHost and startJoin
+const startHost = () => {
+  setIsInitiator(true);
+  setMode('host');
+  setupPeer(true);
+  setStatus('Host started. Share your offer code with the other player.');
+};
+
+const startJoin = () => {
+  setIsInitiator(false);
+  setMode('join');
+  setupPeer(false);
+  setStatus('Join started. Enter the host\'s offer code.');
+};
 
   // Handle role selection and sync
   const handleRoleSelect = (selectedRole) => {
     if (roleLocked) return;
     setRole(selectedRole);
     setRoleLocked(true);
-    // Send role selection to peer
     if (peerRef.current && peerRef.current.connected) {
       peerRef.current.send(JSON.stringify({ type: 'role', role: selectedRole }));
     }
   };
 
-  // Handle incoming data (game state, moves, etc.)
-  function handleData(data) {
+  // Handle incoming data
+  const handleData = (data) => {
     try {
       const msg = JSON.parse(data);
+      console.log('Received message:', msg);
+      
       if (msg.type === 'gameState') {
         setGameState(msg.state);
       } else if (msg.type === 'role') {
-        // Lock in the opposite role
         setRole(msg.role === 'giver' ? 'guesser' : 'giver');
         setRoleLocked(true);
       } else if (msg.type === 'name') {
@@ -137,45 +262,77 @@ function App() {
     } catch (e) {
       console.error("Failed to parse incoming data:", e);
     }
-  }
+  };
 
   // When user provides a signal code
   const handleSignal = () => {
-    if ((mode === 'host' && !remoteSignal.trim()) || (mode === 'join' && !hostSignal.trim())) {
-      setStatus('Please provide the connection code.');
-      return;
+  try {
+
+    if (!peerRef.current || peerRef.current.destroyed) {
+      throw new Error('Connection is not active. Please start a new connection.');
     }
 
-    try {
-      const signalToUse = mode === 'host' ? remoteSignal : hostSignal;
-      const decodedSignal = decodeSignal(signalToUse.trim());
-      peerRef.current.signal(decodedSignal);
-      setStatus('Signal accepted, establishing connection...');
-    } catch (e) {
-      console.error(e);
-      setStatus('That signal code is not valid. Please try again.');
+    const signalToUse = mode === 'host' ? remoteSignal : hostSignal;
+    if (!signalToUse?.trim()) {
+      throw new Error('Please provide the connection code');
     }
-  };
+
+    console.log('Processing signal:', signalToUse);
+    const decodedSignal = decodeSignal(signalToUse.trim());
+    console.log('Decoded signal:', decodedSignal);
+
+    if (!peerRef.current) {
+      throw new Error('Peer connection not initialized');
+    }
+
+    // Accept all valid signal types (offer, answer, candidate)
+    const validTypes = ['offer', 'answer', 'candidate'];
+    if (!decodedSignal.type || !validTypes.includes(decodedSignal.type)) {
+      throw new Error(`Invalid signal type: ${decodedSignal.type}`);
+    }
+
+    peerRef.current.signal(decodedSignal);
+    setStatus('Signal accepted, establishing connection...');
+
+  } catch (e) {
+    console.error('Signal handling error:', e);
+    setStatus(`Error: ${e.message}`);
+    
+    // Reset connection if error occurs
+    if (peerRef.current) {
+      peerRef.current.destroy();
+    }
+    setConnected(false);
+  }
+};
 
   // Send game state to peer
   const sendGameState = (state) => {
     if (peerRef.current && peerRef.current.connected) {
-      peerRef.current.send(JSON.stringify({ type: 'gameState', state }));
+      try {
+        peerRef.current.send(JSON.stringify({ type: 'gameState', state }));
+      } catch (e) {
+        console.error('Error sending game state:', e);
+      }
     }
   };
 
   // Send player name
   const sendPlayerName = (name) => {
     if (peerRef.current && peerRef.current.connected) {
-      peerRef.current.send(JSON.stringify({ type: 'name', name }));
+      try {
+        peerRef.current.send(JSON.stringify({ type: 'name', name }));
+      } catch (e) {
+        console.error('Error sending player name:', e);
+      }
     }
   };
-  
+
   // Set player name and proceed
   const handleNameSet = (name) => {
     setPlayerName(name);
   };
-  
+
   // When connection is established, exchange names
   useEffect(() => {
     if (connected && playerName) {
@@ -334,7 +491,7 @@ function App() {
       <div className="fixed bottom-0 left-0 w-full bg-black bg-opacity-90 text-green-300 text-xs p-2 font-mono z-50">
         <div className="flex justify-between items-center">
           <span className="font-bold">DEBUG PANEL</span>
-          <span>mode: {JSON.stringify(mode)} | connected: {JSON.stringify(connected)} | status: {JSON.stringify(status)}</span>
+          <span>mode: {JSON.stringify(mode)} | connected: {JSON.stringify(connected)} | status: {JSON.stringify(status) } | ICE_state: {JSON.stringify(ICEStatus)} </span>
         </div>
       </div>
     </div>
