@@ -1,0 +1,58 @@
+/* src/GameCustom.css */
+
+.bg-gradient-soft {
+  background: linear-gradient(135deg, #f8fafc 0%, #e0e7ff 100%);
+}
+
+@media (prefers-color-scheme: dark) {
+  .bg-gradient-soft {
+    background: linear-gradient(135deg, #1e293b 0%, #312e81 100%);
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.7s cubic-bezier(.4,0,.2,1);
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(20px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.hangman-part {
+  opacity: 0;
+  transform: scale(0.8);
+  animation: hangmanPop 0.4s cubic-bezier(.4,0,.2,1) forwards;
+}
+
+@keyframes hangmanPop {
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.keyboard-btn {
+  transition: background 0.15s, color 0.15s, box-shadow 0.15s, transform 0.08s;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+}
+.keyboard-btn:active {
+  transform: scale(0.96);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.10);
+}
+.keyboard-btn-active {
+  background: #1e293b !important;
+  color: #fff !important;
+}
+.keyboard-btn-inactive {
+  opacity: 0.3;
+}
+
+.next-round-glow {
+  animation: nextRoundPulse 1.2s infinite alternate;
+  box-shadow: 0 0 0 0 #6366f1;
+}
+@keyframes nextRoundPulse {
+  from { box-shadow: 0 0 0 0 #6366f1; }
+  to   { box-shadow: 0 0 16px 4px #6366f1; }
+} 
